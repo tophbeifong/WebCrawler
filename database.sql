@@ -4,4 +4,4 @@
 */
 
 CREATE DATABASE `webcrawler`;
-CREATE TABLE `listings` (url VARCHAR(255), description TEXT(400), keywords TEXT(500));
+CREATE TABLE `listings` (url VARCHAR(255), title TEXT(400));
