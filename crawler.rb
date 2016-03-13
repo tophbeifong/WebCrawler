@@ -1,16 +1,18 @@
-require 'net/http'
+require 'mechanize'
 require 'mysql'
 
 class WebCrawler
-  attr_reader :connection
-
-  def initialize()
+  def initialize
+    #connect to the database when creating the instance
     @connection = Mysql.new("localhost","root","","webcrawler")
   end
 
   private
   def check_data(site_data)
-    row_count = @connection.query("SELECT `url` FROM `listings` WHERE `url`='#{site_data[:url]}'")
+    #check if the data is already in the database
+    row_count = @connection.query("SELECT `url` FROM `listings` WHERE `url`='#{site_data}'")
+
+    #simple if statement to return true if the url is already in the database
     if row_count.num_rows > 0
       return true
     else
@@ -18,96 +20,115 @@ class WebCrawler
     end
   end
 
-  private
-  def save_site_crawl(site_data)
-    if !site_data[:description][1].nil?
-      description_sanitized = site_data[:description][1].sub!("'","&#39;")
-    else
-      description_sanitized = "Description Not Availiable."
-    end
-    if !site_data[:keywords][1].nil?
-      keywords_sanitized = site_data[:keywords][1].sub!("'","&#39;")
-    else
-      keywords_sanitized = "Keywords Not Availiable."
-    end
-    if !site_data[:title][1].nil?
-      sanitized_title = site_data[:title][1].sub!("'","&#39;")
-    else
-      sanitized_title = site_data[:url]
-    end
+  def save_site_crawl(site_data, title)
 
-    if check_data(site_data)
-      update_query = @connection.query("UPDATE `listings` SET `url`='#{site_data[:url]}', `title`='#{site_data[:title][1]}', `description`='#{site_data[:description][1]}', `keywords`='#{site_data[:keywords][1]}' WHERE `url`='#{site_data[:url]}'")
-    else
-      insert_query = @connection.query("INSERT INTO `listings` (`url`,`title`,`description`,`keywords`) VALUES ('#{site_data[:url]}','#{site_data[:title][1]}','#{description_sanitized}','#{keywords_sanitized}')")
+    #sanitize single quote for safe SQL query, removes ' characters and replaces them with HTML value
+    site_data = site_data.gsub("'","&#39;")
+    title = title.gsub("'","&#39;")
+
+    #begin so it will keep running even if an error occurs
+    begin
+      #if the listing exists it will simply update the query
+      if check_data(site_data)
+        update_query = @connection.query("UPDATE `listings` SET `url`='#{site_data}',`title`='#{title}' WHERE `url`='#{site_data}'")
+      else
+        insert_query = @connection.query("INSERT INTO `listings` (`url`,`title`) VALUES ('#{site_data}','#{title}')")
+      end
+      #avoid the code from cancling, display error
+    rescue StandardError => error_message
+      puts "ERROR: #{error_message}"
     end
   end
 
-  private
-  def get_url_information(url)
-    response = Net::HTTP.get_response(URI(url))
-    case response
-    when Net::HTTPSuccess then url = url
-    when Net::HTTPRedirection then url = response['location']
-    when Net::HTTPNotFound then return
-    else puts "Other response code: #{response.code}"
-    end
-    page_source = Net::HTTP.get(URI.parse(url))
-    title = page_source.match(/<title>(.*)<\/title>/i).to_a
-    description = page_source.match(/<meta\s+(?:[^>]*?\s+)?name="description" content="([^"]*)"/i).to_a
-    keywords = page_source.match(/<meta\s+(?:[^>]*?\s+)?name="keywords" content="([^"]*)"/i).to_a
-    data_found = {url: url, title: title, description: description, keywords: keywords}
-    puts "#{data_found[:url]}\n#{data_found[:title][1]}\n#{data_found[:description][1]}\n==============================\n"
-    save_site_crawl(data_found)
-  end
-
-  private
   def fetch_database_urls
+    #fetch all urls from the database to scan...
     active_urls = []
     fetch_urls = @connection.query("SELECT `url` FROM `listings`")
+
+    #loop through each result and push to an array so we can return it
     while url = fetch_urls.fetch_row do
       active_urls.push(url)
     end
     return active_urls
   end
 
-  private
-  def exception()
-
-  end
-
   public
-  def crawl
+  def crawl()
+    links_found = 0
+
+    #create Mechanize instance
+    agent = Mechanize.new
+
+    #call out fetch method
     database_urls = fetch_database_urls()
+
+    #iterate through the fetched urls and scan
     database_urls.each do |url_to_crawl|
-      puts "Fetching Source For: #{url_to_crawl[0]}"
       begin
-        page_source = Net::HTTP.get(URI.parse(url_to_crawl[0]))
-        urls_found = page_source.scan(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"/i).to_a
-        urls_found.each do |url|
-          case url[0][0..4]
-          when "https" then get_url_information(url[0])
-          when "http:" then get_url_information(url[0])
-          else
-            if url_to_crawl[url_to_crawl.length - 1] == "/"
-              get_url_information(url_to_crawl[0] + url[0])
+
+        #use Mechanize get method to get the page source
+        page = agent.get(url_to_crawl[0])
+
+        #use Mechanize links method to extract the a href links and store in an array
+        links =  page.links
+
+        #iterate through the link array to access each element
+        links.each do |link|
+
+          #get the value of the HTML link href attribute using "attributes" method
+          scraped_url = link.attributes['href']
+
+          #if the url is "#" go onto the next loop item
+          next if scraped_url == "#"
+
+          #get the page title of the scrapped url
+          get_title = agent.get(scraped_url)
+
+          #grab the title of the scrapped page
+          page_title = get_title.title
+
+          #check if the scrapped url has the protocol on it already
+          case scraped_url[0..4]
+            when "https" then
+              save_site_crawl(scraped_url, page_title)
+              puts "Checking: #{scraped_url}\nTitle: #{page_title}\n---------------------------------------------\n"
+            when "http:" then
+              save_site_crawl(scraped_url, page_title)
+              puts "Checking: #{scraped_url}\nTitle: #{page_title}\n---------------------------------------------\n"
+            when "ftp:/" then
+              save_site_crawl(scraped_url, page_title)
+              puts "Checking: #{scraped_url}\nTitle: #{page_title}\n---------------------------------------------\n"
             else
-              if url[0][0..1] == "/"
-                get_url_information(url_to_crawl[0] + url[0])
+
+              #split the scraped url to remove the "file" and just grab the domain
+              url_split = url_to_crawl[0].split("/")
+
+              #check if the scrapped url's first character is /
+              if scraped_url[0] == "/"
+
+                #if so we'll just append the link
+                final_url = url_split[0] + "//" + url_split[2] + scraped_url
               else
-                get_url_information(url_to_crawl[0] + "/" + url[0])
+
+                #else we'll add the trailing slash before the file
+                final_url = url_split[0] + "//" + url_split[2] + "/" + scraped_url
               end
-            end
+              puts "Checking: #{final_url}\nTitle: #{page_title}\n---------------------------------------------\n"
+              save_site_crawl(final_url, page_title)
           end
-          sleep(0.5)
+
+          #increment the links found variable
+          links_found += 1
         end
-      rescue StandardError
-        puts "Could not contact: #{url_to_crawl[0]}"
+
+        #control errors so script doesnt die.
+      rescue StandardError => get_error
+        puts "Request Level Error: #{get_error}"
       end
     end
-    crawl()
+    puts "Status Update:#{links_found} links found."
   end
 end
 
-start = WebCrawler.new()
-start.crawl
+crawler = WebCrawler.new
+crawler.crawl
